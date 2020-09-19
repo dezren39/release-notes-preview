@@ -19,7 +19,13 @@ module.exports =
 /******/ 		};
 /******/
 /******/ 		// Execute the module function
-/******/ 		modules[moduleId].call(module.exports, module, module.exports, __webpack_require__);
+/******/ 		var threw = true;
+/******/ 		try {
+/******/ 			modules[moduleId].call(module.exports, module, module.exports, __webpack_require__);
+/******/ 			threw = false;
+/******/ 		} finally {
+/******/ 			if(threw) delete installedModules[moduleId];
+/******/ 		}
 /******/
 /******/ 		// Flag the module as loaded
 /******/ 		module.l = true;
@@ -635,7 +641,7 @@ function parseXML(str, cb) {
     }
   }
 
-  parser.ontext = function(t) {
+  parser.oncdata = parser.ontext = function(t) {
     if (current) current.value += t
   }
 
@@ -729,6 +735,7 @@ buildParser('xml', [
 
 module.exports = parsers;
 module.exports.use = buildParser;
+
 
 /***/ }),
 
@@ -1299,6 +1306,7 @@ module.exports = {
 "use strict";
 
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.previewFromCommits = void 0;
 const config = __webpack_require__(145);
 function previewFromCommits(commitsData) {
     if (commitsData.feat.length === 0 && commitsData.fix.length === 0) {
@@ -1737,6 +1745,7 @@ module.exports = config;
 "use strict";
 
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.commitStatusSuccess = exports.commitStatusPending = void 0;
 const config = __webpack_require__(145);
 async function commitStatusPending(url) {
     await postCommitStatus(url, 'pending', 'awaiting release notes review');
@@ -2827,7 +2836,7 @@ module.exports = safer
 //////////////////////////////////////////
 // Needle -- HTTP Client for Node.js
 // Written by Tomás Pollak <tomas@forkhq.com>
-// (c) 2012-2017 - Fork Ltd.
+// (c) 2012-2020 - Fork Ltd.
 // MIT Licensed
 //////////////////////////////////////////
 
@@ -2852,7 +2861,7 @@ var version     = __webpack_require__(360).version;
 var user_agent  = 'Needle/' + version;
 user_agent     += ' (Node.js ' + process.version + '; ' + process.platform + ' ' + process.arch + ')';
 
-var tls_options = 'agent pfx key passphrase cert ca ciphers rejectUnauthorized secureProtocol checkServerIdentity';
+var tls_options = 'agent pfx key passphrase cert ca ciphers rejectUnauthorized secureProtocol checkServerIdentity family';
 
 // older versions of node (< 0.11.4) prevent the runtime from exiting
 // because of connections in keep-alive state. so if this is the case
@@ -2863,25 +2872,38 @@ var close_by_default = !http.Agent || http.Agent.defaultMaxSockets != Infinity;
 var extend = Object.assign ? Object.assign : __webpack_require__(669)._extend;
 
 // these are the status codes that Needle interprets as redirects.
-var redirect_codes = [301, 302, 303, 307];
+var redirect_codes = [301, 302, 303, 307, 308];
 
 //////////////////////////////////////////
-// decompressors for gzip/deflate bodies
+// decompressors for gzip/deflate/br bodies
+
+function bind_opts(fn, options) {
+  return fn.bind(null, options);
+}
 
 var decompressors = {};
 
 try {
 
   var zlib = __webpack_require__(903);
-  decompressors['x-deflate'] = zlib.Inflate;
-  decompressors['deflate']   = zlib.Inflate;
-  decompressors['x-gzip']    = zlib.Gunzip;
-  decompressors['gzip']      = zlib.Gunzip;
 
   // Enable Z_SYNC_FLUSH to avoid Z_BUF_ERROR errors (Node PR #2595)
   var zlib_options = {
     flush: zlib.Z_SYNC_FLUSH,
     finishFlush: zlib.Z_SYNC_FLUSH
+  };
+
+  var br_options = {
+    flush: zlib.BROTLI_OPERATION_FLUSH,
+    finishFlush: zlib.BROTLI_OPERATION_FLUSH
+  };
+
+  decompressors['x-deflate'] = bind_opts(zlib.Inflate, zlib_options);
+  decompressors['deflate']   = bind_opts(zlib.Inflate, zlib_options);
+  decompressors['x-gzip']    = bind_opts(zlib.Gunzip, zlib_options);
+  decompressors['gzip']      = bind_opts(zlib.Gunzip, zlib_options);
+  if (typeof zlib.BrotliDecompress === 'function') {
+    decompressors['br']      = bind_opts(zlib.BrotliDecompress, br_options);
   }
 
 } catch(e) { /* zlib not available */ }
@@ -2897,6 +2919,7 @@ var defaults = {
   proxy                   : null,
 
   // headers
+  headers                 : {},
   accept                  : '*/*',
   user_agent              : user_agent,
 
@@ -2908,13 +2931,15 @@ var defaults = {
   stream_length           : -1,
 
   // booleans
+  compressed              : false,
   decode_response         : true,
   parse_cookies           : true,
   follow_set_cookies      : false,
   follow_set_referer      : false,
   follow_keep_method      : false,
   follow_if_same_host     : false,
-  follow_if_same_protocol : false
+  follow_if_same_protocol : false,
+  follow_if_same_location : false
 }
 
 var aliased = {
@@ -2946,7 +2971,7 @@ function keys_by_type(type) {
 function parse_content_type(header) {
   if (!header || header === '') return {};
 
-  var found, charset = 'iso-8859-1', arr = header.split(';');
+  var found, charset = 'utf8', arr = header.split(';');
 
   if (arr.length > 1 && (found = arr[1].match(/charset=(.+)/)))
     charset = found[1];
@@ -3023,6 +3048,7 @@ Needle.prototype.setup = function(uri, options) {
     http_opts : {
       localAddress: get_option('localAddress', undefined)
     }, // passed later to http.request() directly
+    headers   : {},
     output    : options.output,
     proxy     : get_option('proxy', defaults.proxy),
     parser    : get_option('parse_response', defaults.parse_response),
@@ -3049,10 +3075,11 @@ Needle.prototype.setup = function(uri, options) {
   //////////////////////////////////////////////////
   // headers, cookies
 
-  config.headers = {
-    'accept'     : options.accept     || defaults.accept,
-    'user-agent' : options.user_agent || defaults.user_agent
-  }
+  for (var key in defaults.headers)
+    config.headers[key] = defaults.headers[key];
+
+  config.headers['accept'] = options.accept || defaults.accept;
+  config.headers['user-agent'] = options.user_agent || defaults.user_agent;
 
   if (options.content_type)
     config.headers['content-type'] = options.content_type;
@@ -3062,7 +3089,7 @@ Needle.prototype.setup = function(uri, options) {
     config.headers['connection'] = options.connection || 'close';
 
   if ((options.compressed || defaults.compressed) && typeof zlib != 'undefined')
-    config.headers['accept-encoding'] = 'gzip,deflate';
+    config.headers['accept-encoding'] = decompressors['br'] ? 'gzip, deflate, br' : 'gzip, deflate';
 
   if (options.cookies)
     config.headers['cookie'] = cookies.write(options.cookies);
@@ -3102,6 +3129,8 @@ Needle.prototype.setup = function(uri, options) {
   // now that all our headers are set, overwrite them if instructed.
   for (var h in options.headers)
     config.headers[h.toLowerCase()] = options.headers[h];
+
+  config.uri_modifier = get_option('uri_modifier', null);
 
   return config;
 }
@@ -3237,7 +3266,7 @@ Needle.prototype.should_follow = function(location, config, original) {
   }
 
   // first, check whether the requested location is actually different from the original
-  if (location === original)
+  if (!config.follow_if_same_location && location === original)
     return false;
 
   if (config.follow_if_same_host && !matches('host'))
@@ -3250,6 +3279,12 @@ Needle.prototype.should_follow = function(location, config, original) {
 }
 
 Needle.prototype.send_request = function(count, method, uri, config, post_data, out, callback) {
+
+  if (typeof config.uri_modifier === 'function') {
+    var modified_uri = config.uri_modifier(uri);
+    debug('Modifying request URI', uri + ' => ' + modified_uri);
+    uri = modified_uri;
+  }
 
   var timer,
       returned     = 0,
@@ -3294,7 +3329,7 @@ Needle.prototype.send_request = function(count, method, uri, config, post_data, 
   // for an example case, see test/long_string_spec.js. we make sure this
   // scenario ocurred by verifying the socket's writable & destroyed states.
   function on_socket_end() {
-    if (!this.writable && this.destroyed === false) {
+    if (returned && !this.writable && this.destroyed === false) {
       this.destroy();
       had_error(new Error('Remote end closed socket abruptly.'))
     }
@@ -3311,8 +3346,8 @@ Needle.prototype.send_request = function(count, method, uri, config, post_data, 
 
     // if we got cookies, parse them unless we were instructed not to. make sure to include any
     // cookies that might have been set on previous redirects.
-    if (config.parse_cookies && (headers['set-cookie'] || config.stored_cookies)) {
-      resp.cookies = extend(config.stored_cookies || {}, cookies.read(headers['set-cookie']));
+    if (config.parse_cookies && (headers['set-cookie'] || config.previous_resp_cookies)) {
+      resp.cookies = extend(config.previous_resp_cookies || {}, cookies.read(headers['set-cookie']));
       debug('Got cookies', resp.cookies);
     }
 
@@ -3331,10 +3366,17 @@ Needle.prototype.send_request = function(count, method, uri, config, post_data, 
           delete config.headers['content-length']; // in case the original was a multipart POST request.
         }
 
-        // if follow_set_cookies is true, make sure to put any cookies in the next request's headers.
-        if (config.follow_set_cookies && resp.cookies) {
-          config.stored_cookies    = resp.cookies;
-          config.headers['cookie'] = cookies.write(resp.cookies);
+        // if follow_set_cookies is true, insert cookies in the next request's headers.
+        // we set both the original request cookies plus any response cookies we might have received.
+        if (config.follow_set_cookies) {
+          var request_cookies = cookies.read(config.headers['cookie']);
+          config.previous_resp_cookies = resp.cookies;
+          if (Object.keys(request_cookies).length || Object.keys(resp.cookies || {}).length) {
+            config.headers['cookie'] = cookies.write(extend(request_cookies, resp.cookies));
+          }
+        } else if (config.headers['cookie']) {
+          debug('Clearing original request cookie', config.headers['cookie']);
+          delete config.headers['cookie'];
         }
 
         if (config.follow_set_referer)
@@ -3372,7 +3414,7 @@ Needle.prototype.send_request = function(count, method, uri, config, post_data, 
     // To start, if our body is compressed and we're able to inflate it, do it.
     if (headers['content-encoding'] && decompressors[headers['content-encoding']]) {
 
-      var decompressor = decompressors[headers['content-encoding']](zlib_options);
+      var decompressor = decompressors[headers['content-encoding']]();
 
       // make sure we catch errors triggered by the decompressor.
       decompressor.on('error', had_error);
@@ -3398,10 +3440,9 @@ Needle.prototype.send_request = function(count, method, uri, config, post_data, 
     // If we're not parsing, and unless decoding was disabled, we'll try
     // decoding non UTF-8 bodies to UTF-8, using the iconv-lite library.
     } else if (text_response && config.decode_response
-      && mime.charset && !mime.charset.match(/utf-?8$/i)) {
+      && mime.charset) {
         pipeline.push(decoder(mime.charset));
     }
-
     // And `out` is the stream we finally push the decoded/parsed output to.
     pipeline.push(out);
 
@@ -3599,7 +3640,7 @@ module.exports.defaults = function(obj) {
       }
       defaults[target_key] = obj[key];
     } else {
-      throw new Error('Invalid property for defaults:' + target_key);      
+      throw new Error('Invalid property for defaults:' + target_key);
     }
   }
 
@@ -3838,9 +3879,9 @@ IconvLiteDecoderStream.prototype.collect = function(cb) {
 /***/ }),
 
 /***/ 326:
-/***/ (function() {
+/***/ (function(module) {
 
-eval("require")("spawn-sync");
+module.exports = eval("require")("spawn-sync");
 
 
 /***/ }),
@@ -4201,7 +4242,7 @@ exports.write = writeCookieString;
 /***/ 360:
 /***/ (function(module) {
 
-module.exports = {"_args":[["needle@2.4.0","/usr/local/src/docker/modules/release-notes-preview"]],"_from":"needle@2.4.0","_id":"needle@2.4.0","_inBundle":false,"_integrity":"sha512-4Hnwzr3mi5L97hMYeNl8wRW/Onhy4nUKR/lVemJ8gJedxxUyBLm9kkrDColJvoSfwi0jCNhD+xCdOtiGDQiRZg==","_location":"/needle","_phantomChildren":{},"_requested":{"type":"version","registry":true,"raw":"needle@2.4.0","name":"needle","escapedName":"needle","rawSpec":"2.4.0","saveSpec":null,"fetchSpec":"2.4.0"},"_requiredBy":["/"],"_resolved":"https://registry.npmjs.org/needle/-/needle-2.4.0.tgz","_spec":"2.4.0","_where":"/usr/local/src/docker/modules/release-notes-preview","author":{"name":"Tomás Pollak","email":"tomas@forkhq.com"},"bin":{"needle":"bin/needle"},"bugs":{"url":"https://github.com/tomas/needle/issues"},"dependencies":{"debug":"^3.2.6","iconv-lite":"^0.4.4","sax":"^1.2.4"},"description":"The leanest and most handsome HTTP client in the Nodelands.","devDependencies":{"JSONStream":"^1.3.5","jschardet":"^1.6.0","mocha":"^5.2.0","q":"^1.5.1","should":"^13.2.3","sinon":"^2.3.0","xml2js":"^0.4.19"},"directories":{"lib":"./lib"},"engines":{"node":">= 4.4.x"},"homepage":"https://github.com/tomas/needle#readme","keywords":["http","https","simple","request","client","multipart","upload","proxy","deflate","timeout","charset","iconv","cookie","redirect"],"license":"MIT","main":"./lib/needle","name":"needle","repository":{"type":"git","url":"git+https://github.com/tomas/needle.git"},"scripts":{"test":"mocha test"},"tags":["http","https","simple","request","client","multipart","upload","proxy","deflate","timeout","charset","iconv","cookie","redirect"],"version":"2.4.0"};
+module.exports = {"_from":"needle@2.5.2","_id":"needle@2.5.2","_inBundle":false,"_integrity":"sha512-LbRIwS9BfkPvNwNHlsA41Q29kL2L/6VaOJ0qisM5lLWsTV3nP15abO5ITL6L81zqFhzjRKDAYjpcBcwM0AVvLQ==","_location":"/needle","_phantomChildren":{},"_requested":{"type":"version","registry":true,"raw":"needle@2.5.2","name":"needle","escapedName":"needle","rawSpec":"2.5.2","saveSpec":null,"fetchSpec":"2.5.2"},"_requiredBy":["#USER","/"],"_resolved":"https://registry.npmjs.org/needle/-/needle-2.5.2.tgz","_shasum":"cf1a8fce382b5a280108bba90a14993c00e4010a","_spec":"needle@2.5.2","_where":"/usr/local/src/docker/modules/release-notes-preview","author":{"name":"Tomás Pollak","email":"tomas@forkhq.com"},"bin":{"needle":"bin/needle"},"bugs":{"url":"https://github.com/tomas/needle/issues"},"bundleDependencies":false,"dependencies":{"debug":"^3.2.6","iconv-lite":"^0.4.4","sax":"^1.2.4"},"deprecated":false,"description":"The leanest and most handsome HTTP client in the Nodelands.","devDependencies":{"JSONStream":"^1.3.5","jschardet":"^1.6.0","mocha":"^5.2.0","q":"^1.5.1","should":"^13.2.3","sinon":"^2.3.0","xml2js":"^0.4.19"},"directories":{"lib":"./lib"},"engines":{"node":">= 4.4.x"},"homepage":"https://github.com/tomas/needle#readme","keywords":["http","https","simple","request","client","multipart","upload","proxy","deflate","timeout","charset","iconv","cookie","redirect"],"license":"MIT","main":"./lib/needle","name":"needle","repository":{"type":"git","url":"git+https://github.com/tomas/needle.git"},"scripts":{"test":"mocha test"},"tags":["http","https","simple","request","client","multipart","upload","proxy","deflate","timeout","charset","iconv","cookie","redirect"],"version":"2.5.2"};
 
 /***/ }),
 
@@ -4358,7 +4399,7 @@ var digest = {};
 
 digest.parse_header = function(header) {
   var challenge = {},
-      matches   = header.match(/([a-z0-9_-]+)="?([a-z0-9=\/\.@\s-]+)"?/gi);
+      matches   = header.match(/([a-z0-9_-]+)="?([a-z0-9=\/\.@\s-\+]+)"?/gi);
 
   for (var i = 0, l = matches.length; i < l; i++) {
     var parts = matches[i].split('='),
@@ -4397,9 +4438,11 @@ digest.generate = function(header, user, pass, method, path) {
     cnonce = md5(Math.random().toString(36)).substr(0, 8);
     nc     = digest.update_nc(nc);
     resp   = resp.concat(nc, cnonce);
+    resp   = resp.concat(challenge.qop, ha2);
+  } else {
+    resp   = resp.concat(ha2);
   }
 
-  resp = resp.concat(challenge.qop, ha2);
 
   var params = {
     uri      : path,
@@ -5560,6 +5603,7 @@ module.exports = require("path");
 "use strict";
 
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.handlePullRequest = void 0;
 const comment = __webpack_require__(965);
 const commit = __webpack_require__(991);
 const compose = __webpack_require__(42);
@@ -5589,6 +5633,7 @@ exports.handlePullRequest = handlePullRequest;
 "use strict";
 
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.handleIssueComment = void 0;
 const needle = __webpack_require__(219);
 const config = __webpack_require__(145);
 const commit_status_1 = __webpack_require__(148);
@@ -8810,7 +8855,7 @@ StreamDecoder.prototype._transform = function(chunk, encoding, done) {
   var res, found;
 
   // try get charset from chunk, just once
-  if (this.charset == 'iso-8859-1' && !this.parsed_chunk) {
+  if (this.charset == 'utf8' && !this.parsed_chunk) {
     this.parsed_chunk = true;
 
     var matches = regex.exec(chunk.toString());
@@ -9039,9 +9084,9 @@ module.exports = (function () {
 /***/ }),
 
 /***/ 858:
-/***/ (function() {
+/***/ (function(module) {
 
-eval("require")("supports-color");
+module.exports = eval("require")("supports-color");
 
 
 /***/ }),
@@ -9328,6 +9373,7 @@ module.exports = [["8740","䏰䰲䘃䖦䕸𧉧䵷䖳𧲱䳢𧳅㮕䜶䝄䱇䱀�
 "use strict";
 
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.deleteExistingComments = exports.postComment = void 0;
 const needle = __webpack_require__(219);
 const config = __webpack_require__(145);
 const options = {
@@ -9551,6 +9597,7 @@ exports.fork = fork;
 "use strict";
 
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.getCommits = void 0;
 const child_process_promise_1 = __webpack_require__(330);
 const config = __webpack_require__(145);
 async function getCommits() {
